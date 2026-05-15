@@ -23,11 +23,11 @@ export default function App() {
   useEffect(() => {
     loadSettings();
     if (Platform.OS === 'android') {
-      requestBatteryOptimization();
+      // Un petit délai pour éviter de bloquer l'affichage au démarrage
+      setTimeout(() => {
+        requestBatteryOptimization();
+      }, 1500);
     }
-    return () => {
-      stopRelayInternal();
-    };
   }, []);
 
   const requestBatteryOptimization = () => {
@@ -47,11 +47,27 @@ export default function App() {
   };
 
   const stopRelayInternal = () => {
-    addLog("🛑 Arrêt du service de fond...");
-    ReactNativeForegroundService.stop_all();
+    addLog("Demande d'arret du service...");
     try {
-      ReactNativeForegroundService.remove_task({ taskId: 'relay_task' });
-    } catch(e) {}
+      // Tentative d'arrêt avec les différentes méthodes possibles selon la version
+      if (ReactNativeForegroundService.stop_all) {
+        ReactNativeForegroundService.stop_all();
+      } else if (ReactNativeForegroundService.stopAll) {
+        ReactNativeForegroundService.stopAll();
+      } else if (ReactNativeForegroundService.stop) {
+        ReactNativeForegroundService.stop();
+      }
+
+      if (ReactNativeForegroundService.remove_all_tasks) {
+        ReactNativeForegroundService.remove_all_tasks();
+      } else if (ReactNativeForegroundService.remove_task) {
+        ReactNativeForegroundService.remove_task('relay_task');
+      }
+
+      addLog("Service et taches arretes.");
+    } catch(e) {
+      addLog("Erreur arret: " + (e ? e.message : "erreur inconnue"));
+    }
   };
 
   const addLog = (msg) => {
@@ -66,7 +82,7 @@ export default function App() {
       if (storedShop) setShopName(storedShop);
       if (storedIp) setPrinterIp(storedIp);
     } catch (e) {
-      addLog(`Erreur chargement: ${e.message}`);
+      addLog("Erreur chargement: " + (e ? e.message : ""));
     }
   };
 
@@ -75,7 +91,7 @@ export default function App() {
       await AsyncStorage.setItem('boutididact_shopName', shopName.trim());
       await AsyncStorage.setItem('boutididact_printerIp', printerIp.trim());
     } catch (e) {
-      addLog(`Erreur sauvegarde: ${e.message}`);
+      addLog("Erreur sauvegarde: " + (e ? e.message : ""));
     }
   };
 
@@ -88,7 +104,7 @@ export default function App() {
     if (isRunning) {
       stopRelayInternal();
       setIsRunning(false);
-      addLog("🛑 Relais ARRETÉ");
+      addLog("Relais ARRETE");
     } else {
       setIsLoading(true);
       try {
@@ -106,7 +122,7 @@ export default function App() {
 
         await saveSettings();
         setIsRunning(true);
-        addLog(`🚀 Relais DÉMARRÉ pour ${validName}`);
+        addLog("Relais DEMARRE pour " + validName);
         
         // Start Foreground Service
         ReactNativeForegroundService.start({
@@ -142,13 +158,13 @@ export default function App() {
 
       const data = await response.json();
       if (data && data.ticket) {
-        addLog(`📥 TICKET REÇU : ID ${data.ticket.ticketId || 'Inconnu'}`);
+        addLog("TICKET RECU : ID " + (data.ticket.ticketId || 'Inconnu'));
         printTicket(data.ticket);
       }
     } catch (error) {
       // Don't log network errors every 5 seconds to avoid spamming the logs
       if (!error.message.includes('Network request failed')) {
-         addLog(`❌ Erreur Polling: ${error.message}`);
+         addLog("Erreur Polling: " + error.message);
       }
     }
   };
@@ -157,10 +173,10 @@ export default function App() {
     const ip = printerIp.trim();
     const port = 9100;
     
-    addLog(`🖨️ Connexion à l'imprimante ${ip}:${port}...`);
+    addLog("Connexion a l'imprimante " + ip + ":" + port + "...");
     
     const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
-      addLog("✅ Imprimante connectée. Envoi des données...");
+      addLog("Imprimante connectee. Envoi des données...");
       
       // ESC/POS Commands
       // INIT
@@ -183,11 +199,11 @@ export default function App() {
     });
 
     client.on('error', (error) => {
-      addLog(`❌ Erreur Imprimante: ${error.message}`);
+      addLog("Erreur Imprimante: " + error.message);
     });
 
     client.on('close', () => {
-      addLog("🔒 Connexion imprimante fermée.");
+      addLog("Connexion imprimante fermee.");
     });
   };
 
@@ -201,7 +217,7 @@ export default function App() {
       <View style={styles.card}>
         <View style={[styles.statusBadge, isRunning ? styles.statusOnline : styles.statusOffline]}>
           <Text style={[styles.statusText, isRunning ? styles.statusTextOnline : styles.statusTextOffline]}>
-            {isRunning ? '🟢 RELAIS ACTIF' : '🔴 RELAIS INACTIF'}
+            {isRunning ? 'RELAIS ACTIF' : 'RELAIS INACTIF'}
           </Text>
         </View>
 
