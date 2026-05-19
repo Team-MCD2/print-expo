@@ -40,6 +40,9 @@
       "eas": {
         "projectId": "914776bf-1a31-46c1-bda9-ac8805b83dfd"
       }
-    }
+    },
+    "plugins": [
+      "./withForegroundService.js"
+    ]
   }
 }

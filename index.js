@@ -17,7 +17,11 @@ const CLOUD_URL = 'https://boutididact-backendd.vercel.app';
  */
 export const generateEscPosBytes = (ticket, width = 32) => {
   const buffers = [];
-  const add = (str) => buffers.push(Buffer.from(str, 'utf-8'));
+  const stripAccents = (str) => {
+    if (!str) return '';
+    return String(str).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  };
+  const add = (str) => buffers.push(Buffer.from(stripAccents(str), 'utf-8'));
   const addBytes = (arr) => buffers.push(Buffer.from(arr));
 
   const drawLine = () => add("-".repeat(width) + "\n");
