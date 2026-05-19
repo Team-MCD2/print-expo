@@ -25,6 +25,8 @@
       "edgeToEdgeEnabled": true,
       "permissions": [
         "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "POST_NOTIFICATIONS",
         "WAKE_LOCK",
         "INTERNET",
         "ACCESS_NETWORK_STATE",

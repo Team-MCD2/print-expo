@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Alert, KeyboardAvoidingView, Platform, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Alert, KeyboardAvoidingView, Platform, ActivityIndicator, PermissionsAndroid } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import TcpSocket from 'react-native-tcp-socket';
 import { useKeepAwake } from 'expo-keep-awake';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import * as IntentLauncher from 'expo-intent-launcher';
+
+import { generateEscPosBytes } from './index';
 
 const CLOUD_URL = 'https://boutididact-backendd.vercel.app';
 const POLL_INTERVAL_MS = 5000;
@@ -60,60 +62,10 @@ const globalRelay = {
     const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
       this.addLog("Imprimante connectee. Envoi des données...");
 
-      const buffers = [];
+      // Génère le ticket complet via notre fonction factorisée
+      const ticketBytes = generateEscPosBytes(ticket, 32);
+      client.write(ticketBytes);
 
-      // 1. Initialisation
-      buffers.push(Buffer.from([0x1B, 0x40])); 
-
-      // 2. En-tête (Center, Bold, Large)
-      buffers.push(Buffer.from([0x1B, 0x61, 0x01])); // Align Center
-      buffers.push(Buffer.from([0x1B, 0x45, 0x01])); // Bold ON
-      buffers.push(Buffer.from([0x1D, 0x21, 0x11])); // Double size
-      buffers.push(Buffer.from(`${ticket.shop?.name || 'BOUTIDIDACT'}\n\n`, 'utf-8'));
-
-      // Normal size, keeping Center and Bold
-      buffers.push(Buffer.from([0x1D, 0x21, 0x00])); 
-      buffers.push(Buffer.from("TICKET CLIENT\n", 'utf-8'));
-      buffers.push(Buffer.from(`ID: ${ticket.ticketId || 'Inconnu'}\n`, 'utf-8'));
-      
-      const dateStr = new Date().toLocaleDateString('fr-FR');
-      const timeStr = new Date().toLocaleTimeString('fr-FR');
-      buffers.push(Buffer.from(`${dateStr} - ${timeStr}\n`, 'utf-8'));
-      buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
-
-      // 3. Articles (Left, Normal)
-      buffers.push(Buffer.from([0x1B, 0x61, 0x00])); // Align Left
-      buffers.push(Buffer.from([0x1B, 0x45, 0x00])); // Bold OFF
-
-      const w = 32; // safe for both 58mm and 80mm
-      (ticket.items || []).forEach(it => {
-        const name = String(it.name || '').slice(0, 16);
-        const qty = String(it.quantity || 1) + "x";
-        const price = Number(it.price || 0).toFixed(2) + "E";
-        const line = `${qty} ${name}`.padEnd(w - price.length) + price;
-        buffers.push(Buffer.from(`${line}\n`, 'utf-8'));
-      });
-
-      buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
-
-      // 4. Total (Right, Bold)
-      buffers.push(Buffer.from([0x1B, 0x61, 0x02])); // Align Right
-      buffers.push(Buffer.from([0x1B, 0x45, 0x01])); // Bold ON
-      buffers.push(Buffer.from(`TOTAL: ${Number(ticket.total || 0).toFixed(2)} EUR\n`, 'utf-8'));
-      buffers.push(Buffer.from([0x1B, 0x45, 0x00])); // Bold OFF
-      buffers.push(Buffer.from(`Paiement: ${ticket.payment || 'CB'}\n\n`, 'utf-8'));
-
-      // 5. Footer (Center)
-      buffers.push(Buffer.from([0x1B, 0x61, 0x01])); // Align Center
-      if (ticket.shop?.footer) {
-        buffers.push(Buffer.from(`${ticket.shop.footer}\n`, 'utf-8'));
-      }
-      buffers.push(Buffer.from("Merci de votre visite !\n\n\n\n", 'utf-8'));
-
-      // 6. Coupe
-      buffers.push(Buffer.from([0x1D, 0x56, 0x41, 0x00])); 
-
-      client.write(Buffer.concat(buffers));
       setTimeout(() => client.destroy(), 1500);
     });
 
@@ -155,9 +107,29 @@ export default function App() {
     };
   }, []);
 
+  const requestNotificationPermission = async () => {
+    if (Platform.OS === 'android' && Platform.Version >= 33) {
+      try {
+        await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+          {
+            title: "Autoriser les notifications",
+            message: "L'application a besoin d'afficher une notification persistante pour maintenir l'impression en arrière-plan active.",
+            buttonNeutral: "Plus tard",
+            buttonNegative: "Refuser",
+            buttonPositive: "Autoriser",
+          }
+        );
+      } catch (err) {
+        console.warn(err);
+      }
+    }
+  };
+
   useEffect(() => {
     loadSettings();
     if (Platform.OS === 'android') {
+      requestNotificationPermission();
       setTimeout(() => {
         requestBatteryOptimization();
       }, 1500);

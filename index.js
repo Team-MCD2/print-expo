@@ -12,13 +12,115 @@ import App from './App';
 
 const CLOUD_URL = 'https://boutididact-backendd.vercel.app';
 
+/**
+ * Formate un ticket ESC/POS à l'identique d'un ticket Hiboutik réel.
+ */
+export const generateEscPosBytes = (ticket, width = 32) => {
+  const buffers = [];
+  const add = (str) => buffers.push(Buffer.from(str, 'utf-8'));
+  const addBytes = (arr) => buffers.push(Buffer.from(arr));
+
+  const drawLine = () => add("-".repeat(width) + "\n");
+  const padLeftRight = (left, right) => {
+    const spaces = Math.max(0, width - left.length - right.length);
+    return left + " ".repeat(spaces) + right;
+  };
+  const padCenterStr = (str, w) => {
+    if (str.length >= w) return str.slice(0, w);
+    const left = Math.floor((w - str.length) / 2);
+    return ' '.repeat(left) + str + ' '.repeat(w - str.length - left);
+  };
+
+  // 1. Initialisation de l'imprimante
+  addBytes([0x1B, 0x40]);
+
+  // 2. En-tête commerce
+  addBytes([0x1B, 0x61, 0x01]); // Aligné au centre
+  addBytes([0x1B, 0x45, 0x01]); // Gras ON
+  addBytes([0x1D, 0x21, 0x11]); // Double taille (largeur & hauteur)
+  add((ticket.shop?.name || 'BOUTIDIDACT').toUpperCase() + "\n");
+  
+  addBytes([0x1D, 0x21, 0x00]); // Taille normale
+  addBytes([0x1B, 0x45, 0x00]); // Gras OFF
+  if (ticket.shop?.address) add(ticket.shop.address + "\n");
+  if (ticket.shop?.siret) add(`SIRET : ${ticket.shop.siret}\n`);
+  if (ticket.shop?.tva) add(`TVA : ${ticket.shop.tva}\n`);
+  drawLine();
+
+  // 3. Métadonnées ticket
+  addBytes([0x1B, 0x61, 0x00]); // Aligné à gauche
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('fr-FR');
+  const timeStr = now.toLocaleTimeString('fr-FR');
+  add(padLeftRight(`Ticket : ${ticket.ticketId || `T-${Date.now()}`}`, dateStr) + "\n");
+  if (ticket.saleId) {
+    add(padLeftRight(`Vente : #${ticket.saleId}`, timeStr) + "\n");
+  } else {
+    add(padLeftRight('', timeStr) + "\n");
+  }
+  drawLine();
+
+  // 4. Lignes articles (Colonnes alignées)
+  const nameW = Math.floor(width * 0.55); // 17 caractères
+  const qtyW = Math.floor(width * 0.15);  // 4 caractères
+  const totalW = width - nameW - qtyW;   // 11 caractères
+
+  const header = "Article".padEnd(nameW) + padCenterStr("Qte", qtyW) + "Total".padStart(totalW);
+  add(header + "\n");
+  drawLine();
+
+  (ticket.items || []).forEach((it) => {
+    const name = String(it.name || '').slice(0, nameW - 1).padEnd(nameW);
+    const qty = padCenterStr(String(it.quantity || 1), qtyW);
+    const lineTotal = (Number(it.price || 0) * Number(it.quantity || 1)).toFixed(2) + " EUR";
+    const lineTotalPadded = lineTotal.padStart(totalW);
+    add(name + qty + lineTotalPadded + "\n");
+    if (Number(it.quantity || 1) > 1) {
+      add(`   ${Number(it.price || 0).toFixed(2)} EUR / unite\n`);
+    }
+  });
+  drawLine();
+
+  // 5. Total TTC
+  addBytes([0x1B, 0x61, 0x02]); // Aligné à droite
+  addBytes([0x1B, 0x45, 0x01]); // Gras ON
+  addBytes([0x1D, 0x21, 0x11]); // Double taille
+  add(`TOTAL TTC : ${Number(ticket.total || 0).toFixed(2)} EUR\n`);
+  addBytes([0x1D, 0x21, 0x00]); // Taille normale
+  addBytes([0x1B, 0x45, 0x00]); // Gras OFF
+
+  // Détail TVA
+  if (Array.isArray(ticket.taxBreakdown) && ticket.taxBreakdown.length) {
+    addBytes([0x1B, 0x61, 0x00]); // Aligné à gauche
+    add('Detail TVA :\n');
+    ticket.taxBreakdown.forEach((t) => {
+      add(`  TVA ${t.rate}%  HT ${Number(t.base).toFixed(2)}  TVA ${Number(t.tax).toFixed(2)}\n`);
+    });
+  }
+
+  // 6. Mode de paiement
+  addBytes([0x1B, 0x61, 0x00]); // Aligné à gauche
+  add(`Paiement : ${ticket.payment || 'CB'}\n`);
+  drawLine();
+
+  // 7. Pied de page
+  addBytes([0x1B, 0x61, 0x01]); // Aligné au centre
+  if (ticket.shop?.footer) add(ticket.shop.footer + "\n");
+  add(padCenterStr('Ticket non valable comme facture', width) + "\n");
+  add(padCenterStr(`Edite le ${dateStr} a ${timeStr}`, width) + "\n\n\n\n");
+
+  // 8. Coupe automatique
+  addBytes([0x1D, 0x56, 0x41, 0x00]);
+
+  return Buffer.concat(buffers);
+};
+
 // 1. Enregistrement du service de premier plan (Foreground Service)
 try {
   if (Platform.OS === 'android') {
     ReactNativeForegroundService.register();
 
     // 2. Définition de la tâche d'arrière-plan globale (Headless)
-    // Elle s'exécutera de manière persistante en arrière-plan, même si l'application est minimisée ou fermée !
     ReactNativeForegroundService.add_task(async () => {
       try {
         const shopName = await AsyncStorage.getItem('boutididact_shopName');
@@ -34,65 +136,13 @@ try {
           if (data && data.ticket) {
             console.log("[Service Arrière-plan] Ticket reçu ID:", data.ticket.ticketId);
 
-            // Impression ESC/POS du ticket complet
             const ip = printerIp.trim();
             const port = 9100;
 
             const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
-              const buffers = [];
-
-              // Initialisation
-              buffers.push(Buffer.from([0x1B, 0x40])); 
-
-              // En-tête (Center, Bold, Large)
-              buffers.push(Buffer.from([0x1B, 0x61, 0x01])); 
-              buffers.push(Buffer.from([0x1B, 0x45, 0x01])); 
-              buffers.push(Buffer.from([0x1D, 0x21, 0x11])); 
-              buffers.push(Buffer.from(`${data.ticket.shop?.name || 'BOUTIDIDACT'}\n\n`, 'utf-8'));
-
-              // Normal size, keeping Center and Bold
-              buffers.push(Buffer.from([0x1D, 0x21, 0x00])); 
-              buffers.push(Buffer.from("TICKET CLIENT\n", 'utf-8'));
-              buffers.push(Buffer.from(`ID: ${data.ticket.ticketId || 'Inconnu'}\n`, 'utf-8'));
-              
-              const dateStr = new Date().toLocaleDateString('fr-FR');
-              const timeStr = new Date().toLocaleTimeString('fr-FR');
-              buffers.push(Buffer.from(`${dateStr} - ${timeStr}\n`, 'utf-8'));
-              buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
-
-              // Articles (Left, Normal)
-              buffers.push(Buffer.from([0x1B, 0x61, 0x00])); 
-              buffers.push(Buffer.from([0x1B, 0x45, 0x00])); 
-
-              const w = 32; 
-              (data.ticket.items || []).forEach(it => {
-                const name = String(it.name || '').slice(0, 16);
-                const qty = String(it.quantity || 1) + "x";
-                const price = Number(it.price || 0).toFixed(2) + "E";
-                const line = `${qty} ${name}`.padEnd(w - price.length) + price;
-                buffers.push(Buffer.from(`${line}\n`, 'utf-8'));
-              });
-
-              buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
-
-              // Total (Right, Bold)
-              buffers.push(Buffer.from([0x1B, 0x61, 0x02])); 
-              buffers.push(Buffer.from([0x1B, 0x45, 0x01])); 
-              buffers.push(Buffer.from(`TOTAL: ${Number(data.ticket.total || 0).toFixed(2)} EUR\n`, 'utf-8'));
-              buffers.push(Buffer.from([0x1B, 0x45, 0x00])); 
-              buffers.push(Buffer.from(`Paiement: ${data.ticket.payment || 'CB'}\n\n`, 'utf-8'));
-
-              // Footer (Center)
-              buffers.push(Buffer.from([0x1B, 0x61, 0x01])); 
-              if (data.ticket.shop?.footer) {
-                buffers.push(Buffer.from(`${data.ticket.shop.footer}\n`, 'utf-8'));
-              }
-              buffers.push(Buffer.from("Merci de votre visite !\n\n\n\n", 'utf-8'));
-
-              // Coupe
-              buffers.push(Buffer.from([0x1D, 0x56, 0x41, 0x00])); 
-
-              client.write(Buffer.concat(buffers));
+              // Génère le ticket ESC/POS à l'identique de Hiboutik
+              const ticketBytes = generateEscPosBytes(data.ticket, 32);
+              client.write(ticketBytes);
               setTimeout(() => client.destroy(), 1500);
             });
 
