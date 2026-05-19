@@ -60,85 +60,61 @@ const globalRelay = {
     const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
       this.addLog("Imprimante connectee. Envoi des données...");
 
-      try {
-        const commands = [];
+      const buffers = [];
 
-        // 1. INIT
-        commands.push(Buffer.from([0x1B, 0x40]));
+      // 1. Initialisation
+      buffers.push(Buffer.from([0x1B, 0x40])); 
 
-        // 2. Alignement centré pour l'entête
-        commands.push(Buffer.from([0x1B, 0x61, 0x01]));
+      // 2. En-tête (Center, Bold, Large)
+      buffers.push(Buffer.from([0x1B, 0x61, 0x01])); // Align Center
+      buffers.push(Buffer.from([0x1B, 0x45, 0x01])); // Bold ON
+      buffers.push(Buffer.from([0x1D, 0x21, 0x11])); // Double size
+      buffers.push(Buffer.from(`${ticket.shop?.name || 'BOUTIDIDACT'}\n\n`, 'utf-8'));
 
-        // 3. Infos Boutique
-        const shop = ticket.shop || {};
-        const sName = shop.name || 'BOUTIDIDACT';
-        commands.push(Buffer.from([0x1B, 0x45, 0x01])); // BOLD ON
-        commands.push(Buffer.from(`${sName}\n`, 'utf-8'));
-        commands.push(Buffer.from([0x1B, 0x45, 0x00])); // BOLD OFF
+      // Normal size, keeping Center and Bold
+      buffers.push(Buffer.from([0x1D, 0x21, 0x00])); 
+      buffers.push(Buffer.from("TICKET CLIENT\n", 'utf-8'));
+      buffers.push(Buffer.from(`ID: ${ticket.ticketId || 'Inconnu'}\n`, 'utf-8'));
+      
+      const dateStr = new Date().toLocaleDateString('fr-FR');
+      const timeStr = new Date().toLocaleTimeString('fr-FR');
+      buffers.push(Buffer.from(`${dateStr} - ${timeStr}\n`, 'utf-8'));
+      buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
 
-        if (shop.address) commands.push(Buffer.from(`${shop.address}\n`, 'utf-8'));
-        if (shop.siret) commands.push(Buffer.from(`SIRET : ${shop.siret}\n`, 'utf-8'));
-        if (shop.tva) commands.push(Buffer.from(`TVA : ${shop.tva}\n`, 'utf-8'));
-        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+      // 3. Articles (Left, Normal)
+      buffers.push(Buffer.from([0x1B, 0x61, 0x00])); // Align Left
+      buffers.push(Buffer.from([0x1B, 0x45, 0x00])); // Bold OFF
 
-        // 4. Métadonnées du Ticket
-        commands.push(Buffer.from([0x1B, 0x61, 0x00])); // ALIGNEMENT GAUCHE
-        const dateStr = new Date().toLocaleDateString('fr-FR');
-        const timeStr = new Date().toLocaleTimeString('fr-FR');
-        commands.push(Buffer.from(`Ticket ID : ${ticket.ticketId || 'Inconnu'}\n`, 'utf-8'));
-        if (ticket.saleId) commands.push(Buffer.from(`Vente ID  : #${ticket.saleId}\n`, 'utf-8'));
-        commands.push(Buffer.from(`Date      : ${dateStr} ${timeStr}\n`, 'utf-8'));
-        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+      const w = 32; // safe for both 58mm and 80mm
+      (ticket.items || []).forEach(it => {
+        const name = String(it.name || '').slice(0, 16);
+        const qty = String(it.quantity || 1) + "x";
+        const price = Number(it.price || 0).toFixed(2) + "E";
+        const line = `${qty} ${name}`.padEnd(w - price.length) + price;
+        buffers.push(Buffer.from(`${line}\n`, 'utf-8'));
+      });
 
-        // 5. Entête des Articles
-        commands.push(Buffer.from(`Article               Qte  Total\n`, 'utf-8'));
-        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+      buffers.push(Buffer.from("--------------------------------\n", 'utf-8'));
 
-        // 6. Boucle sur les Articles du Panier
-        const items = ticket.items || [];
-        items.forEach((it) => {
-          const rawName = String(it.name || '');
-          const qty = String(it.quantity || 1).padStart(3);
-          const priceVal = (Number(it.price) * Number(it.quantity)).toFixed(2);
-          const priceStr = `${priceVal} EUR`.padStart(9);
+      // 4. Total (Right, Bold)
+      buffers.push(Buffer.from([0x1B, 0x61, 0x02])); // Align Right
+      buffers.push(Buffer.from([0x1B, 0x45, 0x01])); // Bold ON
+      buffers.push(Buffer.from(`TOTAL: ${Number(ticket.total || 0).toFixed(2)} EUR\n`, 'utf-8'));
+      buffers.push(Buffer.from([0x1B, 0x45, 0x00])); // Bold OFF
+      buffers.push(Buffer.from(`Paiement: ${ticket.payment || 'CB'}\n\n`, 'utf-8'));
 
-          // Si le nom de l'article dépasse 19 caractères, on le coupe proprement, sinon on padde
-          const shortName = rawName.slice(0, 19).padEnd(20);
-          commands.push(Buffer.from(`${shortName}${qty}${priceStr}\n`, 'utf-8'));
-          
-          // Si le nom était plus long, on affiche la suite en dessous
-          if (rawName.length > 19) {
-            commands.push(Buffer.from(`  ${rawName.slice(19, 50)}\n`, 'utf-8'));
-          }
-        });
-        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
-
-        // 7. Total Général
-        commands.push(Buffer.from([0x1B, 0x61, 0x02])); // ALIGNEMENT DROITE
-        commands.push(Buffer.from([0x1B, 0x45, 0x01])); // BOLD ON
-        commands.push(Buffer.from(`TOTAL TTC : ${Number(ticket.total || 0).toFixed(2)} EUR\n`, 'utf-8'));
-        commands.push(Buffer.from([0x1B, 0x45, 0x00])); // BOLD OFF
-
-        // 8. Mode de Règlement
-        commands.push(Buffer.from([0x1B, 0x61, 0x00])); // ALIGNEMENT GAUCHE
-        commands.push(Buffer.from(`Paiement  : ${ticket.payment || 'CB'}\n`, 'utf-8'));
-        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
-
-        // 9. Pied de Page
-        commands.push(Buffer.from([0x1B, 0x61, 0x01])); // ALIGNEMENT CENTRE
-        commands.push(Buffer.from(`Merci pour votre confiance !\n\n\n\n`, 'utf-8'));
-
-        // 10. Découpe du papier
-        commands.push(Buffer.from([0x1D, 0x56, 0x41, 0x00]));
-
-        // Envoi séquentiel des commandes de buffer
-        commands.forEach(buf => client.write(buf));
-        this.addLog("Données du ticket envoyées avec succès !");
-      } catch (err) {
-        this.addLog("Erreur écriture ticket: " + err.message);
+      // 5. Footer (Center)
+      buffers.push(Buffer.from([0x1B, 0x61, 0x01])); // Align Center
+      if (ticket.shop?.footer) {
+        buffers.push(Buffer.from(`${ticket.shop.footer}\n`, 'utf-8'));
       }
+      buffers.push(Buffer.from("Merci de votre visite !\n\n\n\n", 'utf-8'));
 
-      setTimeout(() => client.destroy(), 1200);
+      // 6. Coupe
+      buffers.push(Buffer.from([0x1D, 0x56, 0x41, 0x00])); 
+
+      client.write(Buffer.concat(buffers));
+      setTimeout(() => client.destroy(), 1500);
     });
 
     client.on('error', (error) => {
@@ -150,11 +126,6 @@ const globalRelay = {
     });
   }
 };
-
-// Fonction globale d'arrière-plan appelée par l'index.js pour le Foreground Service
-export async function runBackgroundPoll() {
-  await globalRelay.pollTicket();
-}
 
 export default function App() {
   useKeepAwake(); // Keep screen on
