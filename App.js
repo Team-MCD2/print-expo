@@ -162,10 +162,7 @@ export default function App() {
         printTicket(data.ticket);
       }
     } catch (error) {
-      // Don't log network errors every 5 seconds to avoid spamming the logs
-      if (!error.message.includes('Network request failed')) {
-         addLog("Erreur Polling: " + error.message);
-      }
+      addLog("Erreur Polling: " + error.message);
     }
   };
 
