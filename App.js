@@ -9,21 +9,184 @@ import * as IntentLauncher from 'expo-intent-launcher';
 const CLOUD_URL = 'https://boutididact-backendd.vercel.app';
 const POLL_INTERVAL_MS = 5000;
 
+// ---- Global state et logique hors composant pour le Foreground Service ----
+// Évite les fuites mémoire et les closures périmées quand le composant React
+// se démonte ou se recrée. Le service en arrière-plan appelle directement cette structure globale.
+const globalRelay = {
+  logs: [],
+  shopName: '',
+  printerIp: '192.168.1.100',
+  setLogsCallback: null,
+
+  addLog(msg) {
+    const time = new Date().toLocaleTimeString();
+    const entry = `[${time}] ${msg}`;
+    this.logs = [entry, ...this.logs].slice(0, 50);
+    console.log("[Relais]", entry);
+    if (this.setLogsCallback) {
+      try {
+        this.setLogsCallback([...this.logs]);
+      } catch (e) {
+        console.error("Callback log error:", e);
+      }
+    }
+  },
+
+  async pollTicket() {
+    try {
+      const currentShopName = this.shopName.trim();
+      if (!currentShopName) return;
+
+      const url = `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(currentShopName)}`;
+      const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (data && data.ticket) {
+        this.addLog("TICKET RECU : ID " + (data.ticket.ticketId || 'Inconnu'));
+        this.printTicket(data.ticket);
+      }
+    } catch (error) {
+      this.addLog("Erreur Polling: " + error.message);
+    }
+  },
+
+  printTicket(ticket) {
+    const ip = this.printerIp.trim();
+    const port = 9100;
+
+    this.addLog("Connexion a l'imprimante " + ip + ":" + port + "...");
+
+    const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
+      this.addLog("Imprimante connectee. Envoi des données...");
+
+      try {
+        const commands = [];
+
+        // 1. INIT
+        commands.push(Buffer.from([0x1B, 0x40]));
+
+        // 2. Alignement centré pour l'entête
+        commands.push(Buffer.from([0x1B, 0x61, 0x01]));
+
+        // 3. Infos Boutique
+        const shop = ticket.shop || {};
+        const sName = shop.name || 'BOUTIDIDACT';
+        commands.push(Buffer.from([0x1B, 0x45, 0x01])); // BOLD ON
+        commands.push(Buffer.from(`${sName}\n`, 'utf-8'));
+        commands.push(Buffer.from([0x1B, 0x45, 0x00])); // BOLD OFF
+
+        if (shop.address) commands.push(Buffer.from(`${shop.address}\n`, 'utf-8'));
+        if (shop.siret) commands.push(Buffer.from(`SIRET : ${shop.siret}\n`, 'utf-8'));
+        if (shop.tva) commands.push(Buffer.from(`TVA : ${shop.tva}\n`, 'utf-8'));
+        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+
+        // 4. Métadonnées du Ticket
+        commands.push(Buffer.from([0x1B, 0x61, 0x00])); // ALIGNEMENT GAUCHE
+        const dateStr = new Date().toLocaleDateString('fr-FR');
+        const timeStr = new Date().toLocaleTimeString('fr-FR');
+        commands.push(Buffer.from(`Ticket ID : ${ticket.ticketId || 'Inconnu'}\n`, 'utf-8'));
+        if (ticket.saleId) commands.push(Buffer.from(`Vente ID  : #${ticket.saleId}\n`, 'utf-8'));
+        commands.push(Buffer.from(`Date      : ${dateStr} ${timeStr}\n`, 'utf-8'));
+        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+
+        // 5. Entête des Articles
+        commands.push(Buffer.from(`Article               Qte  Total\n`, 'utf-8'));
+        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+
+        // 6. Boucle sur les Articles du Panier
+        const items = ticket.items || [];
+        items.forEach((it) => {
+          const rawName = String(it.name || '');
+          const qty = String(it.quantity || 1).padStart(3);
+          const priceVal = (Number(it.price) * Number(it.quantity)).toFixed(2);
+          const priceStr = `${priceVal} EUR`.padStart(9);
+
+          // Si le nom de l'article dépasse 19 caractères, on le coupe proprement, sinon on padde
+          const shortName = rawName.slice(0, 19).padEnd(20);
+          commands.push(Buffer.from(`${shortName}${qty}${priceStr}\n`, 'utf-8'));
+          
+          // Si le nom était plus long, on affiche la suite en dessous
+          if (rawName.length > 19) {
+            commands.push(Buffer.from(`  ${rawName.slice(19, 50)}\n`, 'utf-8'));
+          }
+        });
+        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+
+        // 7. Total Général
+        commands.push(Buffer.from([0x1B, 0x61, 0x02])); // ALIGNEMENT DROITE
+        commands.push(Buffer.from([0x1B, 0x45, 0x01])); // BOLD ON
+        commands.push(Buffer.from(`TOTAL TTC : ${Number(ticket.total || 0).toFixed(2)} EUR\n`, 'utf-8'));
+        commands.push(Buffer.from([0x1B, 0x45, 0x00])); // BOLD OFF
+
+        // 8. Mode de Règlement
+        commands.push(Buffer.from([0x1B, 0x61, 0x00])); // ALIGNEMENT GAUCHE
+        commands.push(Buffer.from(`Paiement  : ${ticket.payment || 'CB'}\n`, 'utf-8'));
+        commands.push(Buffer.from(`--------------------------------\n`, 'utf-8'));
+
+        // 9. Pied de Page
+        commands.push(Buffer.from([0x1B, 0x61, 0x01])); // ALIGNEMENT CENTRE
+        commands.push(Buffer.from(`Merci pour votre confiance !\n\n\n\n`, 'utf-8'));
+
+        // 10. Découpe du papier
+        commands.push(Buffer.from([0x1D, 0x56, 0x41, 0x00]));
+
+        // Envoi séquentiel des commandes de buffer
+        commands.forEach(buf => client.write(buf));
+        this.addLog("Données du ticket envoyées avec succès !");
+      } catch (err) {
+        this.addLog("Erreur écriture ticket: " + err.message);
+      }
+
+      setTimeout(() => client.destroy(), 1200);
+    });
+
+    client.on('error', (error) => {
+      this.addLog("Erreur Imprimante: " + error.message);
+    });
+
+    client.on('close', () => {
+      this.addLog("Connexion imprimante fermee.");
+    });
+  }
+};
+
+// Fonction globale d'arrière-plan appelée par l'index.js pour le Foreground Service
+export async function runBackgroundPoll() {
+  await globalRelay.pollTicket();
+}
+
 export default function App() {
   useKeepAwake(); // Keep screen on
 
   const [shopName, setShopName] = useState('');
   const [printerIp, setPrinterIp] = useState('192.168.1.100');
   const [isRunning, setIsRunning] = useState(false);
-  const [logs, setLogs] = useState([]);
+  const [logs, setLogs] = useState(globalRelay.logs);
   const [isLoading, setIsLoading] = useState(false);
-  
 
+  // Synchronise les states locaux vers le global
+  useEffect(() => {
+    globalRelay.shopName = shopName;
+  }, [shopName]);
+
+  useEffect(() => {
+    globalRelay.printerIp = printerIp;
+  }, [printerIp]);
+
+  // Enregistre le callback pour mettre à jour les logs de l'interface en direct
+  useEffect(() => {
+    globalRelay.setLogsCallback = (newLogs) => {
+      setLogs(newLogs);
+    };
+    return () => {
+      globalRelay.setLogsCallback = null;
+    };
+  }, []);
 
   useEffect(() => {
     loadSettings();
     if (Platform.OS === 'android') {
-      // Un petit délai pour éviter de bloquer l'affichage au démarrage
       setTimeout(() => {
         requestBatteryOptimization();
       }, 1500);
@@ -47,9 +210,8 @@ export default function App() {
   };
 
   const stopRelayInternal = () => {
-    addLog("Demande d'arret du service...");
+    globalRelay.addLog("Demande d'arret du service...");
     try {
-      // Tentative d'arrêt avec les différentes méthodes possibles selon la version
       if (ReactNativeForegroundService.stop_all) {
         ReactNativeForegroundService.stop_all();
       } else if (ReactNativeForegroundService.stopAll) {
@@ -64,39 +226,65 @@ export default function App() {
         ReactNativeForegroundService.remove_task('relay_task');
       }
 
-      addLog("Service et taches arretes.");
+      globalRelay.addLog("Service et taches arretes.");
     } catch(e) {
-      addLog("Erreur arret: " + (e ? e.message : "erreur inconnue"));
+      globalRelay.addLog("Erreur arret: " + (e ? e.message : "erreur inconnue"));
     }
   };
 
-  const addLog = (msg) => {
-    const time = new Date().toLocaleTimeString();
-    setLogs((prev) => [`[${time}] ${msg}`, ...prev].slice(0, 50));
-  };
+  // React-side polling loop to ensure continuous polling regardless of Headless task constraints
+  useEffect(() => {
+    let intervalId = null;
+    if (isRunning) {
+      intervalId = setInterval(() => {
+        globalRelay.pollTicket();
+      }, POLL_INTERVAL_MS);
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isRunning]);
 
   const loadSettings = async () => {
     try {
       const storedShop = await AsyncStorage.getItem('boutididact_shopName');
       const storedIp = await AsyncStorage.getItem('boutididact_printerIp');
-      if (storedShop) setShopName(storedShop);
-      if (storedIp) setPrinterIp(storedIp);
+      const storedRunning = await AsyncStorage.getItem('boutididact_isRunning');
+      if (storedShop) {
+        setShopName(storedShop);
+        globalRelay.shopName = storedShop;
+      }
+      if (storedIp) {
+        setPrinterIp(storedIp);
+        globalRelay.printerIp = storedIp;
+      }
+      if (storedRunning === 'true') {
+        setIsRunning(true);
+        ReactNativeForegroundService.start({
+          id: 1244,
+          title: "Boutididact Relay",
+          message: `En attente de tickets pour ${storedShop || 'votre boutique'}...`,
+          icon: "ic_launcher",
+          button: false,
+        });
+      }
     } catch (e) {
-      addLog("Erreur chargement: " + (e ? e.message : ""));
+      globalRelay.addLog("Erreur chargement: " + (e ? e.message : ""));
     }
   };
 
-  const saveSettings = async () => {
+  const saveSettings = async (running = false) => {
     try {
-      await AsyncStorage.setItem('boutididact_shopName', shopName.trim());
-      await AsyncStorage.setItem('boutididact_printerIp', printerIp.trim());
+      await AsyncStorage.setItem('boutididact_shopName', globalRelay.shopName.trim());
+      await AsyncStorage.setItem('boutididact_printerIp', globalRelay.printerIp.trim());
+      await AsyncStorage.setItem('boutididact_isRunning', running ? 'true' : 'false');
     } catch (e) {
-      addLog("Erreur sauvegarde: " + (e ? e.message : ""));
+      globalRelay.addLog("Erreur sauvegarde: " + (e ? e.message : ""));
     }
   };
 
   const toggleRelay = async () => {
-    if (!shopName.trim() || !printerIp.trim()) {
+    if (!globalRelay.shopName.trim() || !globalRelay.printerIp.trim()) {
       Alert.alert("Erreur", "Veuillez renseigner le nom de la boutique et l'IP de l'imprimante.");
       return;
     }
@@ -104,11 +292,12 @@ export default function App() {
     if (isRunning) {
       stopRelayInternal();
       setIsRunning(false);
-      addLog("Relais ARRETE");
+      await saveSettings(false);
+      globalRelay.addLog("Relais ARRETE");
     } else {
       setIsLoading(true);
       try {
-        const check = await fetch(`${CLOUD_URL}/api/saas/check-shop?shopName=${encodeURIComponent(shopName.trim())}`);
+        const check = await fetch(`${CLOUD_URL}/api/saas/check-shop?shopName=${encodeURIComponent(globalRelay.shopName.trim())}`);
         const checkData = await check.json();
         
         if (!check.ok || !checkData.ok) {
@@ -117,14 +306,14 @@ export default function App() {
           return;
         }
 
-        const validName = checkData.name || shopName.trim();
-        setShopName(validName); // Sync with exact name from DB
+        const validName = checkData.name || globalRelay.shopName.trim();
+        setShopName(validName);
+        globalRelay.shopName = validName;
 
-        await saveSettings();
         setIsRunning(true);
-        addLog("Relais DEMARRE pour " + validName);
+        await saveSettings(true);
+        globalRelay.addLog("Relais DEMARRE pour " + validName);
         
-        // Start Foreground Service
         ReactNativeForegroundService.start({
           id: 1244,
           title: "Boutididact Relay",
@@ -133,75 +322,23 @@ export default function App() {
           button: false,
         });
 
-        // Register the polling task
-        ReactNativeForegroundService.add_task(() => pollTicket(), {
-          delay: POLL_INTERVAL_MS,
-          onLoop: true,
-          taskId: 'relay_task',
-          onError: (e) => console.log(`Error logging:`, e),
-        });
+        // Enregistre aussi la tâche de service en arrière-plan
+        try {
+          ReactNativeForegroundService.add_task(() => globalRelay.pollTicket(), {
+            delay: POLL_INTERVAL_MS,
+            onLoop: true,
+            taskId: 'relay_task',
+            onError: (e) => console.log(`Error logging:`, e),
+          });
+        } catch (e) { /* ignore task fail if already added */ }
   
-        pollTicket(); // Run once immediately
+        globalRelay.pollTicket(); // Run once immediately
       } catch (e) {
-        Alert.alert("Erreur Réseau", "Impossible de vérifier la boutique.");
+        Alert.alert("Erreur Réseau", "Impossible de vérifier la boutique : " + e.message);
       } finally {
         setIsLoading(false);
       }
     }
-  };
-
-  const pollTicket = async () => {
-    try {
-      const url = `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(shopName.trim())}`;
-      const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }});
-      if (!response.ok) return;
-
-      const data = await response.json();
-      if (data && data.ticket) {
-        addLog("TICKET RECU : ID " + (data.ticket.ticketId || 'Inconnu'));
-        printTicket(data.ticket);
-      }
-    } catch (error) {
-      addLog("Erreur Polling: " + error.message);
-    }
-  };
-
-  const printTicket = (ticket) => {
-    const ip = printerIp.trim();
-    const port = 9100;
-    
-    addLog("Connexion a l'imprimante " + ip + ":" + port + "...");
-    
-    const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
-      addLog("Imprimante connectee. Envoi des données...");
-      
-      // ESC/POS Commands
-      // INIT
-      client.write(Buffer.from([0x1B, 0x40]));
-      // CENTER
-      client.write(Buffer.from([0x1B, 0x61, 0x01]));
-      // BOLD ON
-      client.write(Buffer.from([0x1B, 0x45, 0x01]));
-      
-      client.write(Buffer.from(`BOUTIDIDACT TICKET\nID: ${ticket.ticketId || 'Inconnu'}\n\n`, 'utf-8'));
-      
-      // BOLD OFF
-      client.write(Buffer.from([0x1B, 0x45, 0x00]));
-      
-      // Cut Paper
-      client.write(Buffer.from([0x1D, 0x56, 0x41, 0x00]));
-      
-      // Close connection
-      setTimeout(() => client.destroy(), 1000);
-    });
-
-    client.on('error', (error) => {
-      addLog("Erreur Imprimante: " + error.message);
-    });
-
-    client.on('close', () => {
-      addLog("Connexion imprimante fermee.");
-    });
   };
 
   return (
