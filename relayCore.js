@@ -171,11 +171,17 @@ function printEscPos(ticket, printerIp) {
   });
 }
 
-async function ackTicket(shopName) {
+function relayHeaders(relayKey, extra = {}) {
+  const h = { ...extra };
+  if (relayKey) h['X-Relay-Key'] = String(relayKey);
+  return h;
+}
+
+async function ackTicket(shopName, relayKey) {
   try {
     const res = await fetch(`${CLOUD_URL}/api/saas/ack-ticket`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: relayHeaders(relayKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({ shopName }),
     });
     if (res.ok) return true;
@@ -184,7 +190,7 @@ async function ackTicket(shopName) {
   try {
     const res = await fetch(
       `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(shopName)}`,
-      { headers: { Accept: 'application/json' } },
+      { headers: relayHeaders(relayKey, { Accept: 'application/json' }) },
     );
     return res.ok;
   } catch {
@@ -192,7 +198,7 @@ async function ackTicket(shopName) {
   }
 }
 
-export async function pollAndPrint(shopName, printerIp, onLog) {
+export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
   if (state.processing) return;
 
   const shop = String(shopName || '').trim();
@@ -201,7 +207,7 @@ export async function pollAndPrint(shopName, printerIp, onLog) {
 
   try {
     const url = `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(shop)}&peek=1`;
-    const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { method: 'GET', headers: relayHeaders(relayKey, { Accept: 'application/json' }) });
     if (!response.ok) return;
 
     const data = await response.json();
@@ -218,7 +224,7 @@ export async function pollAndPrint(shopName, printerIp, onLog) {
 
     const result = await printEscPos(data.ticket, ip);
     if (result.ok) {
-      const acked = await ackTicket(shop);
+      const acked = await ackTicket(shop, relayKey);
       state.lastHandledId = tid;
       state.lastFail = { id: null, at: 0 };
       emitLog(onLog, acked ? `Ticket ${tid} imprime.` : `Ticket ${tid} imprime (ack en attente).`);

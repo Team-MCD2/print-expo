@@ -30,16 +30,17 @@ function getLegacyForegroundOptions(shopName) {
  * Demarre le relais en arriere-plan.
  * Priorite : service Android natif (polling Java). Secours : supersami (dev uniquement).
  */
-export async function ensureRelayForegroundRunning(shopName, printerIp) {
+export async function ensureRelayForegroundRunning(shopName, printerIp, relayKey = '') {
   if (Platform.OS !== 'android') return;
 
   const shop = String(shopName || '').trim();
   const ip = String(printerIp || '').trim();
+  const key = String(relayKey || '').trim();
   if (!shop || !ip) return;
 
   if (hasNativeRelay()) {
     try {
-      await NativeRelay.startRelay(shop, ip);
+      await NativeRelay.startRelay(shop, ip, key);
       return;
     } catch (e) {
       console.warn('[relayService] native startRelay:', e?.message || e);

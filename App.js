@@ -11,6 +11,7 @@ const globalRelay = {
   logs: [],
   shopName: '',
   printerIp: '192.168.1.100',
+  relayKey: '',
   setLogsCallback: null,
 
   addLog(msg) {
@@ -33,6 +34,7 @@ export default function App() {
 
   const [shopName, setShopName] = useState('');
   const [printerIp, setPrinterIp] = useState('192.168.1.100');
+  const [relayKey, setRelayKey] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState(globalRelay.logs);
   const [isLoading, setIsLoading] = useState(false);
@@ -49,6 +51,10 @@ export default function App() {
   useEffect(() => {
     globalRelay.printerIp = printerIp;
   }, [printerIp]);
+
+  useEffect(() => {
+    globalRelay.relayKey = relayKey;
+  }, [relayKey]);
 
   useEffect(() => {
     globalRelay.setLogsCallback = (newLogs) => {
@@ -98,7 +104,7 @@ export default function App() {
       if (nextState === 'background' || nextState === 'inactive' || nextState === 'active') {
         const name = globalRelay.shopName?.trim();
         if (!name) return;
-        await ensureRelayForegroundRunning(name, globalRelay.printerIp);
+        await ensureRelayForegroundRunning(name, globalRelay.printerIp, globalRelay.relayKey);
         if (nextState === 'active' && !hasNativeRelay()) {
           await pollAndPrint(name, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
         }
@@ -138,6 +144,7 @@ export default function App() {
     try {
       const storedShop = await AsyncStorage.getItem('boutididact_shopName');
       const storedIp = await AsyncStorage.getItem('boutididact_printerIp');
+      const storedKey = await AsyncStorage.getItem('boutididact_relayKey');
       const storedRunning = await AsyncStorage.getItem('boutididact_isRunning');
       if (storedShop) {
         setShopName(storedShop);
@@ -147,12 +154,17 @@ export default function App() {
         setPrinterIp(storedIp);
         globalRelay.printerIp = storedIp;
       }
+      if (storedKey) {
+        setRelayKey(storedKey);
+        globalRelay.relayKey = storedKey;
+      }
       if (storedRunning === 'true') {
         setIsRunning(true);
         isRunningRef.current = true;
         await ensureRelayForegroundRunning(
           storedShop || globalRelay.shopName,
           storedIp || globalRelay.printerIp,
+          storedKey || globalRelay.relayKey,
         );
         globalRelay.addLog(
           hasNativeRelay()
@@ -169,6 +181,7 @@ export default function App() {
     try {
       await AsyncStorage.setItem('boutididact_shopName', globalRelay.shopName.trim());
       await AsyncStorage.setItem('boutididact_printerIp', globalRelay.printerIp.trim());
+      await AsyncStorage.setItem('boutididact_relayKey', (globalRelay.relayKey || '').trim());
       await AsyncStorage.setItem('boutididact_isRunning', running ? 'true' : 'false');
     } catch (e) {
       globalRelay.addLog(`Erreur sauvegarde: ${e ? e.message : ''}`);
@@ -208,12 +221,12 @@ export default function App() {
         await saveSettings(true);
         globalRelay.addLog(`Relais DEMARRE pour ${validName}`);
 
-        await ensureRelayForegroundRunning(validName, globalRelay.printerIp);
+        await ensureRelayForegroundRunning(validName, globalRelay.printerIp, globalRelay.relayKey);
 
         if (hasNativeRelay()) {
           globalRelay.addLog('Service natif demarre — vous pouvez quitter l\'app.');
         } else {
-          await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
+          await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg), globalRelay.relayKey);
         }
       } catch (e) {
         Alert.alert('Erreur Reseau', `Impossible de verifier la boutique : ${e.message}`);
@@ -255,6 +268,20 @@ export default function App() {
           placeholder="192.168.1.100"
           placeholderTextColor="#64748b"
           keyboardType="numeric"
+          editable={!isRunning}
+        />
+
+        <Text style={styles.label}>Cle relais (admin web)</Text>
+        <TextInput
+          style={styles.input}
+          value={relayKey}
+          onChangeText={(v) => {
+            setRelayKey(v);
+            globalRelay.relayKey = v;
+          }}
+          placeholder="Collez la cle depuis Parametres > Relais"
+          placeholderTextColor="#64748b"
+          autoCapitalize="none"
           editable={!isRunning}
         />
 

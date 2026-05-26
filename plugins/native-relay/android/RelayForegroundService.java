@@ -51,6 +51,7 @@ public class RelayForegroundService extends Service {
   public static final String PREFS = "boutididact_relay_prefs";
   public static final String KEY_SHOP = "shopName";
   public static final String KEY_IP = "printerIp";
+  public static final String KEY_RELAY = "relayKey";
   public static final String KEY_RUNNING = "isRunning";
 
   public static volatile boolean isRunning = false;
@@ -63,6 +64,7 @@ public class RelayForegroundService extends Service {
 
   private String shopName = "";
   private String printerIp = "";
+  private String relayKey = "";
   private boolean processing = false;
   private String lastHandledId = null;
   private String lastFailId = null;
@@ -89,6 +91,9 @@ public class RelayForegroundService extends Service {
       if (intent.hasExtra(KEY_IP)) {
         printerIp = intent.getStringExtra(KEY_IP);
       }
+      if (intent.hasExtra(KEY_RELAY)) {
+        relayKey = intent.getStringExtra(KEY_RELAY);
+      }
     }
     if (shopName == null || shopName.isEmpty()) {
       shopName = prefs.getString(KEY_SHOP, "");
@@ -96,10 +101,14 @@ public class RelayForegroundService extends Service {
     if (printerIp == null || printerIp.isEmpty()) {
       printerIp = prefs.getString(KEY_IP, "");
     }
+    if (relayKey == null || relayKey.isEmpty()) {
+      relayKey = prefs.getString(KEY_RELAY, "");
+    }
 
     prefs.edit()
         .putString(KEY_SHOP, shopName)
         .putString(KEY_IP, printerIp)
+        .putString(KEY_RELAY, relayKey != null ? relayKey : "")
         .putBoolean(KEY_RUNNING, true)
         .apply();
 
@@ -163,11 +172,13 @@ public class RelayForegroundService extends Service {
     try {
       String encoded = URLEncoder.encode(shop, StandardCharsets.UTF_8.name());
       String url = CLOUD_URL + "/api/saas/poll-ticket?shopName=" + encoded + "&peek=1";
-      Request request = new Request.Builder()
+      Request.Builder reqBuilder = new Request.Builder()
           .url(url)
-          .header("Accept", "application/json")
-          .get()
-          .build();
+          .header("Accept", "application/json");
+      if (relayKey != null && !relayKey.trim().isEmpty()) {
+        reqBuilder.header("X-Relay-Key", relayKey.trim());
+      }
+      Request request = reqBuilder.get().build();
 
       try (Response response = http.newCall(request).execute()) {
         if (!response.isSuccessful() || response.body() == null) return;
@@ -254,10 +265,13 @@ public class RelayForegroundService extends Service {
     try {
       JSONObject body = new JSONObject();
       body.put("shopName", shop);
-      Request request = new Request.Builder()
+      Request.Builder ackBuilder = new Request.Builder()
           .url(CLOUD_URL + "/api/saas/ack-ticket")
-          .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
-          .build();
+          .post(RequestBody.create(body.toString(), MediaType.parse("application/json")));
+      if (relayKey != null && !relayKey.trim().isEmpty()) {
+        ackBuilder.header("X-Relay-Key", relayKey.trim());
+      }
+      Request request = ackBuilder.build();
       try (Response response = http.newCall(request).execute()) {
         if (response.isSuccessful()) return;
       }
@@ -266,10 +280,12 @@ public class RelayForegroundService extends Service {
     }
     try {
       String encoded = URLEncoder.encode(shop, StandardCharsets.UTF_8.name());
-      Request fallback = new Request.Builder()
-          .url(CLOUD_URL + "/api/saas/poll-ticket?shopName=" + encoded)
-          .get()
-          .build();
+      Request.Builder fbBuilder = new Request.Builder()
+          .url(CLOUD_URL + "/api/saas/poll-ticket?shopName=" + encoded);
+      if (relayKey != null && !relayKey.trim().isEmpty()) {
+        fbBuilder.header("X-Relay-Key", relayKey.trim());
+      }
+      Request fallback = fbBuilder.get().build();
       http.newCall(fallback).execute().close();
     } catch (Exception e) {
       Log.w(TAG, "ack fallback failed: " + e.getMessage());

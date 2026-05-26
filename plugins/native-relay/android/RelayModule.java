@@ -22,11 +22,12 @@ public class RelayModule extends ReactContextBaseJavaModule {
   }
 
   @ReactMethod
-  public void startRelay(String shopName, String printerIp, Promise promise) {
+  public void startRelay(String shopName, String printerIp, String relayKey, Promise promise) {
     try {
       Context ctx = getReactApplicationContext();
       String shop = shopName != null ? shopName.trim() : "";
       String ip = printerIp != null ? printerIp.trim() : "";
+      String key = relayKey != null ? relayKey.trim() : "";
       if (shop.isEmpty() || ip.isEmpty()) {
         promise.reject("INVALID", "shopName et printerIp requis");
         return;
@@ -36,12 +37,14 @@ public class RelayModule extends ReactContextBaseJavaModule {
       prefs.edit()
           .putString(RelayForegroundService.KEY_SHOP, shop)
           .putString(RelayForegroundService.KEY_IP, ip)
+          .putString(RelayForegroundService.KEY_RELAY, key)
           .putBoolean(RelayForegroundService.KEY_RUNNING, true)
           .apply();
 
       Intent intent = new Intent(ctx, RelayForegroundService.class);
       intent.putExtra(RelayForegroundService.KEY_SHOP, shop);
       intent.putExtra(RelayForegroundService.KEY_IP, ip);
+      intent.putExtra(RelayForegroundService.KEY_RELAY, key);
 
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(intent);
