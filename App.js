@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as IntentLauncher from 'expo-intent-launcher';
 
-import { pollAndPrint, resetRelayState, setRelayLogHandler, testPrint, CLOUD_URL } from './relayCore';
+import { pollAndPrint, resetRelayState, setRelayLogHandler, testPrint, verifyRelay, CLOUD_URL } from './relayCore';
 import { ensureRelayForegroundRunning, stopRelayForeground, hasNativeRelay } from './relayService';
 
 const globalRelay = {
@@ -106,7 +106,7 @@ export default function App() {
         if (!name) return;
         await ensureRelayForegroundRunning(name, globalRelay.printerIp, globalRelay.relayKey);
         if (nextState === 'active' && !hasNativeRelay()) {
-          await pollAndPrint(name, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
+          await pollAndPrint(name, globalRelay.printerIp, (msg) => globalRelay.addLog(msg), globalRelay.relayKey);
         }
       }
     });
@@ -202,16 +202,14 @@ export default function App() {
     } else {
       setIsLoading(true);
       try {
-        const check = await fetch(`${CLOUD_URL}/api/saas/check-shop?shopName=${encodeURIComponent(globalRelay.shopName.trim())}`);
-        const checkData = await check.json();
-
-        if (!check.ok || !checkData.ok) {
-          Alert.alert('Erreur', checkData.message || 'Boutique introuvable ou non activee.');
+        const verified = await verifyRelay(globalRelay.shopName.trim(), globalRelay.relayKey.trim());
+        if (!verified.ok) {
+          Alert.alert('Erreur', verified.message || 'Boutique introuvable.');
           setIsLoading(false);
           return;
         }
 
-        const validName = checkData.name || globalRelay.shopName.trim();
+        const validName = verified.name || globalRelay.shopName.trim();
         setShopName(validName);
         globalRelay.shopName = validName;
         resetRelayState();
@@ -219,7 +217,7 @@ export default function App() {
         setIsRunning(true);
         isRunningRef.current = true;
         await saveSettings(true);
-        globalRelay.addLog(`Relais DEMARRE pour ${validName}`);
+        globalRelay.addLog(`Relais DEMARRE pour ${validName} (Android → imprimante WiFi)`);
 
         await ensureRelayForegroundRunning(validName, globalRelay.printerIp, globalRelay.relayKey);
 
@@ -240,7 +238,7 @@ export default function App() {
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.header}>
         <Text style={styles.title}>Boutididact Print</Text>
-        <Text style={styles.subtitle}>Relais d'Impression Android</Text>
+        <Text style={styles.subtitle}>Relais Cloud → Imprimante WiFi (sans PC)</Text>
       </View>
 
       <View style={styles.card}>
@@ -271,7 +269,7 @@ export default function App() {
           editable={!isRunning}
         />
 
-        <Text style={styles.label}>Cle relais (admin web)</Text>
+        <Text style={styles.label}>Cle relais (optionnel)</Text>
         <TextInput
           style={styles.input}
           value={relayKey}
@@ -279,7 +277,7 @@ export default function App() {
             setRelayKey(v);
             globalRelay.relayKey = v;
           }}
-          placeholder="Collez la cle depuis Parametres > Relais"
+          placeholder="Recommande : Admin web > Relais"
           placeholderTextColor="#64748b"
           autoCapitalize="none"
           editable={!isRunning}

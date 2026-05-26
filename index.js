@@ -21,13 +21,14 @@ if (Platform.OS === 'android' && !hasNativeRelay()) {
       try {
         const shopName = await AsyncStorage.getItem('boutididact_shopName');
         const printerIp = await AsyncStorage.getItem('boutididact_printerIp');
+        const relayKey = await AsyncStorage.getItem('boutididact_relayKey');
         const isRunning = await AsyncStorage.getItem('boutididact_isRunning');
 
         if (isRunning !== 'true' || !shopName || !printerIp) return;
 
         await pollAndPrint(shopName, printerIp, (msg) => {
           console.log('[Relais]', msg);
-        });
+        }, relayKey || '');
       } catch (e) {
         console.log('[Relais] Erreur tache:', e.message);
       }

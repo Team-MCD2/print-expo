@@ -124,6 +124,13 @@ export function generateEscPosBytes(ticket, width = 32) {
   return Buffer.concat(buffers);
 }
 
+function getEscposPayload(ticket, width = 32) {
+  if (ticket?.escposB64) {
+    return Buffer.from(String(ticket.escposB64), 'base64');
+  }
+  return generateEscPosBytes(ticket, width);
+}
+
 function printEscPos(ticket, printerIp) {
   const { ip, port } = resolvePrinterTarget(ticket, printerIp);
   if (!ip) return Promise.resolve({ ok: false, detail: 'IP manquante' });
@@ -153,7 +160,7 @@ function printEscPos(ticket, printerIp) {
     try {
       client = TcpSocket.createConnection({ host: ip, port, timeout: 10000 }, () => {
         try {
-          client.write(generateEscPosBytes(ticket, 32));
+          client.write(getEscposPayload(ticket, 32));
           sent = true;
           successTimeout = setTimeout(() => finish(true, 'imprime'), 2000);
         } catch (e) {
@@ -198,17 +205,55 @@ async function ackTicket(shopName, relayKey) {
   }
 }
 
+export async function verifyRelay(shopName, relayKey) {
+  const shop = String(shopName || '').trim();
+  const key = String(relayKey || '').trim();
+  if (!shop) {
+    return { ok: false, message: 'Nom de boutique requis.' };
+  }
+  if (key) {
+    try {
+      const res = await fetch(`${CLOUD_URL}/api/saas/verify-relay`, {
+        method: 'POST',
+        headers: relayHeaders(key, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ shopName: shop, relayKey: key }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) return { ok: true, name: data.name || shop };
+      if (res.status !== 404 && res.status !== 501) {
+        return { ok: false, message: data.message || 'Cle relais invalide.' };
+      }
+    } catch { /* fallback check-shop */ }
+  }
+  try {
+    const res = await fetch(`${CLOUD_URL}/api/saas/check-shop?shopName=${encodeURIComponent(shop)}`);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) return { ok: true, name: data.name || shop };
+    return { ok: false, message: data.message || 'Boutique introuvable ou non activee.' };
+  } catch (e) {
+    return { ok: false, message: e.message || 'Erreur reseau' };
+  }
+}
+
 export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
   if (state.processing) return;
 
   const shop = String(shopName || '').trim();
   const ip = String(printerIp || '').trim();
+  const key = String(relayKey || '').trim();
   if (!shop || !ip) return;
 
   try {
     const url = `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(shop)}&peek=1`;
-    const response = await fetch(url, { method: 'GET', headers: relayHeaders(relayKey, { Accept: 'application/json' }) });
-    if (!response.ok) return;
+    const response = await fetch(url, { method: 'GET', headers: relayHeaders(key, { Accept: 'application/json' }) });
+    if (!response.ok) {
+      if (response.status === 403 && key) {
+        emitLog(onLog, 'Cle relais refusee — verifiez Admin > Relais.');
+      } else if (response.status === 404) {
+        emitLog(onLog, 'Boutique introuvable sur le cloud.');
+      }
+      return;
+    }
 
     const data = await response.json();
     if (!data?.ticket) return;
