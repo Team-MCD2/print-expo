@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.Base64;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
@@ -217,7 +218,13 @@ public class RelayForegroundService extends Service {
   private boolean printTicket(JSONObject ticket, String ip, int port) {
     Socket socket = null;
     try {
-      byte[] payload = EscPosBuilder.build(ticket);
+      byte[] payload;
+      String b64 = ticket.optString("escposB64", "").trim();
+      if (!b64.isEmpty()) {
+        payload = Base64.decode(b64, Base64.DEFAULT);
+      } else {
+        payload = EscPosBuilder.build(ticket);
+      }
       socket = new Socket();
       socket.connect(new InetSocketAddress(ip, port), 10000);
       socket.setSoTimeout(5000);
