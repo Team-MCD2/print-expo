@@ -1,19 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Alert, KeyboardAvoidingView, Platform, ActivityIndicator, PermissionsAndroid } from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Alert, KeyboardAvoidingView, Platform, ActivityIndicator, PermissionsAndroid, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import TcpSocket from 'react-native-tcp-socket';
 import { useKeepAwake } from 'expo-keep-awake';
-import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import * as IntentLauncher from 'expo-intent-launcher';
 
-import { generateEscPosBytes } from './index';
+import { pollAndPrint, resetRelayState, setRelayLogHandler, testPrint, CLOUD_URL } from './relayCore';
+import { ensureRelayForegroundRunning, stopRelayForeground } from './relayService';
 
-const CLOUD_URL = 'https://boutididact-backendd.vercel.app';
-const POLL_INTERVAL_MS = 5000;
-
-// ---- Global state et logique hors composant pour le Foreground Service ----
-// Évite les fuites mémoire et les closures périmées quand le composant React
-// se démonte ou se recrée. Le service en arrière-plan appelle directement cette structure globale.
 const globalRelay = {
   logs: [],
   shopName: '',
@@ -24,71 +17,31 @@ const globalRelay = {
     const time = new Date().toLocaleTimeString();
     const entry = `[${time}] ${msg}`;
     this.logs = [entry, ...this.logs].slice(0, 50);
-    console.log("[Relais]", entry);
+    console.log('[Relais]', entry);
     if (this.setLogsCallback) {
       try {
         this.setLogsCallback([...this.logs]);
       } catch (e) {
-        console.error("Callback log error:", e);
+        console.error('Callback log error:', e);
       }
     }
   },
-
-  async pollTicket() {
-    try {
-      const currentShopName = this.shopName.trim();
-      if (!currentShopName) return;
-
-      const url = `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(currentShopName)}`;
-      const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
-      if (!response.ok) return;
-
-      const data = await response.json();
-      if (data && data.ticket) {
-        this.addLog("TICKET RECU : ID " + (data.ticket.ticketId || 'Inconnu'));
-        this.printTicket(data.ticket);
-      }
-    } catch (error) {
-      this.addLog("Erreur Polling: " + error.message);
-    }
-  },
-
-  printTicket(ticket) {
-    const ip = this.printerIp.trim();
-    const port = 9100;
-
-    this.addLog("Connexion a l'imprimante " + ip + ":" + port + "...");
-
-    const client = TcpSocket.createConnection({ host: ip, port: port, timeout: 5000 }, () => {
-      this.addLog("Imprimante connectee. Envoi des données...");
-
-      // Génère le ticket complet via notre fonction factorisée
-      const ticketBytes = generateEscPosBytes(ticket, 32);
-      client.write(ticketBytes);
-
-      setTimeout(() => client.destroy(), 1500);
-    });
-
-    client.on('error', (error) => {
-      this.addLog("Erreur Imprimante: " + error.message);
-    });
-
-    client.on('close', () => {
-      this.addLog("Connexion imprimante fermee.");
-    });
-  }
 };
 
 export default function App() {
-  useKeepAwake(); // Keep screen on
+  useKeepAwake();
 
   const [shopName, setShopName] = useState('');
   const [printerIp, setPrinterIp] = useState('192.168.1.100');
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState(globalRelay.logs);
   const [isLoading, setIsLoading] = useState(false);
+  const isRunningRef = useRef(false);
 
-  // Synchronise les states locaux vers le global
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
   useEffect(() => {
     globalRelay.shopName = shopName;
   }, [shopName]);
@@ -97,13 +50,14 @@ export default function App() {
     globalRelay.printerIp = printerIp;
   }, [printerIp]);
 
-  // Enregistre le callback pour mettre à jour les logs de l'interface en direct
   useEffect(() => {
     globalRelay.setLogsCallback = (newLogs) => {
       setLogs(newLogs);
     };
+    setRelayLogHandler((msg) => globalRelay.addLog(msg));
     return () => {
       globalRelay.setLogsCallback = null;
+      setRelayLogHandler(null);
     };
   }, []);
 
@@ -113,12 +67,12 @@ export default function App() {
         await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
           {
-            title: "Autoriser les notifications",
-            message: "L'application a besoin d'afficher une notification persistante pour maintenir l'impression en arrière-plan active.",
-            buttonNeutral: "Plus tard",
-            buttonNegative: "Refuser",
-            buttonPositive: "Autoriser",
-          }
+            title: 'Autoriser les notifications',
+            message: "L'application a besoin d'afficher une notification persistante pour maintenir l'impression en arriere-plan active.",
+            buttonNeutral: 'Plus tard',
+            buttonNegative: 'Refuser',
+            buttonPositive: 'Autoriser',
+          },
         );
       } catch (err) {
         console.warn(err);
@@ -136,57 +90,49 @@ export default function App() {
     }
   }, []);
 
+  // Quand l'app passe en arriere-plan, Android peut couper la boucle JS :
+  // on verifie que le service foreground + la tache de polling sont toujours actifs.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      if (!isRunningRef.current || Platform.OS !== 'android') return;
+      if (nextState === 'background' || nextState === 'inactive' || nextState === 'active') {
+        const name = globalRelay.shopName?.trim();
+        if (!name) return;
+        await ensureRelayForegroundRunning(name);
+        if (nextState === 'active') {
+          await pollAndPrint(name, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
+        }
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
   const requestBatteryOptimization = () => {
     Alert.alert(
-      "Fonctionnement en arrière-plan",
-      "Pour que l'impression fonctionne même quand le téléphone est en veille, veuillez autoriser l'application à fonctionner sans restrictions de batterie.",
+      'Fonctionnement en arriere-plan',
+      "Pour que l'impression fonctionne meme quand le telephone est en veille, veuillez autoriser l'application a fonctionner sans restrictions de batterie.",
       [
-        { text: "Plus tard", style: "cancel" },
-        { 
-          text: "Autoriser", 
+        { text: 'Plus tard', style: 'cancel' },
+        {
+          text: 'Autoriser',
           onPress: () => {
             IntentLauncher.startActivityAsync('android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS');
-          } 
-        }
-      ]
+          },
+        },
+      ],
     );
   };
 
   const stopRelayInternal = () => {
     globalRelay.addLog("Demande d'arret du service...");
     try {
-      if (ReactNativeForegroundService.stop_all) {
-        ReactNativeForegroundService.stop_all();
-      } else if (ReactNativeForegroundService.stopAll) {
-        ReactNativeForegroundService.stopAll();
-      } else if (ReactNativeForegroundService.stop) {
-        ReactNativeForegroundService.stop();
-      }
-
-      if (ReactNativeForegroundService.remove_all_tasks) {
-        ReactNativeForegroundService.remove_all_tasks();
-      } else if (ReactNativeForegroundService.remove_task) {
-        ReactNativeForegroundService.remove_task('relay_task');
-      }
-
-      globalRelay.addLog("Service et taches arretes.");
-    } catch(e) {
-      globalRelay.addLog("Erreur arret: " + (e ? e.message : "erreur inconnue"));
+      stopRelayForeground();
+      resetRelayState();
+      globalRelay.addLog('Relais arrete.');
+    } catch (e) {
+      globalRelay.addLog(`Erreur arret: ${e ? e.message : 'erreur inconnue'}`);
     }
   };
-
-  // React-side polling loop to ensure continuous polling regardless of Headless task constraints
-  useEffect(() => {
-    let intervalId = null;
-    if (isRunning) {
-      intervalId = setInterval(() => {
-        globalRelay.pollTicket();
-      }, POLL_INTERVAL_MS);
-    }
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [isRunning]);
 
   const loadSettings = async () => {
     try {
@@ -203,16 +149,12 @@ export default function App() {
       }
       if (storedRunning === 'true') {
         setIsRunning(true);
-        ReactNativeForegroundService.start({
-          id: 1244,
-          title: "Boutididact Relay",
-          message: `En attente de tickets pour ${storedShop || 'votre boutique'}...`,
-          icon: "ic_launcher",
-          button: false,
-        });
+        isRunningRef.current = true;
+        await ensureRelayForegroundRunning(storedShop || globalRelay.shopName);
+        globalRelay.addLog('Relais restaure au demarrage.');
       }
     } catch (e) {
-      globalRelay.addLog("Erreur chargement: " + (e ? e.message : ""));
+      globalRelay.addLog(`Erreur chargement: ${e ? e.message : ''}`);
     }
   };
 
@@ -222,13 +164,13 @@ export default function App() {
       await AsyncStorage.setItem('boutididact_printerIp', globalRelay.printerIp.trim());
       await AsyncStorage.setItem('boutididact_isRunning', running ? 'true' : 'false');
     } catch (e) {
-      globalRelay.addLog("Erreur sauvegarde: " + (e ? e.message : ""));
+      globalRelay.addLog(`Erreur sauvegarde: ${e ? e.message : ''}`);
     }
   };
 
   const toggleRelay = async () => {
     if (!globalRelay.shopName.trim() || !globalRelay.printerIp.trim()) {
-      Alert.alert("Erreur", "Veuillez renseigner le nom de la boutique et l'IP de l'imprimante.");
+      Alert.alert('Erreur', "Veuillez renseigner le nom de la boutique et l'IP de l'imprimante.");
       return;
     }
 
@@ -236,15 +178,15 @@ export default function App() {
       stopRelayInternal();
       setIsRunning(false);
       await saveSettings(false);
-      globalRelay.addLog("Relais ARRETE");
+      globalRelay.addLog('Relais ARRETE');
     } else {
       setIsLoading(true);
       try {
         const check = await fetch(`${CLOUD_URL}/api/saas/check-shop?shopName=${encodeURIComponent(globalRelay.shopName.trim())}`);
         const checkData = await check.json();
-        
+
         if (!check.ok || !checkData.ok) {
-          Alert.alert("Erreur", checkData.message || "Boutique introuvable ou non activée.");
+          Alert.alert('Erreur', checkData.message || 'Boutique introuvable ou non activee.');
           setIsLoading(false);
           return;
         }
@@ -252,32 +194,19 @@ export default function App() {
         const validName = checkData.name || globalRelay.shopName.trim();
         setShopName(validName);
         globalRelay.shopName = validName;
+        resetRelayState();
 
         setIsRunning(true);
+        isRunningRef.current = true;
         await saveSettings(true);
-        globalRelay.addLog("Relais DEMARRE pour " + validName);
-        
-        ReactNativeForegroundService.start({
-          id: 1244,
-          title: "Boutididact Relay",
-          message: `En attente de tickets pour ${validName}...`,
-          icon: "ic_launcher",
-          button: false,
-        });
+        globalRelay.addLog(`Relais DEMARRE pour ${validName}`);
 
-        // Enregistre aussi la tâche de service en arrière-plan
-        try {
-          ReactNativeForegroundService.add_task(() => globalRelay.pollTicket(), {
-            delay: POLL_INTERVAL_MS,
-            onLoop: true,
-            taskId: 'relay_task',
-            onError: (e) => console.log(`Error logging:`, e),
-          });
-        } catch (e) { /* ignore task fail if already added */ }
-  
-        globalRelay.pollTicket(); // Run once immediately
+        await ensureRelayForegroundRunning(validName);
+
+        // Premier poll immediat (la boucle index.js prend le relais en arriere-plan)
+        await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
       } catch (e) {
-        Alert.alert("Erreur Réseau", "Impossible de vérifier la boutique : " + e.message);
+        Alert.alert('Erreur Reseau', `Impossible de verifier la boutique : ${e.message}`);
       } finally {
         setIsLoading(false);
       }
@@ -319,25 +248,34 @@ export default function App() {
           editable={!isRunning}
         />
 
-        <TouchableOpacity 
-          style={[styles.button, isRunning ? styles.buttonStop : styles.buttonStart, isLoading && styles.buttonDisabled]} 
+        <TouchableOpacity
+          style={[styles.button, isRunning ? styles.buttonStop : styles.buttonStart, isLoading && styles.buttonDisabled]}
           onPress={toggleRelay}
           disabled={isLoading}
         >
           {isLoading ? (
             <ActivityIndicator color="#fff" />
           ) : isRunning ? (
-            <Text style={[styles.buttonText, { color: '#fff' }]}>Arrêter le relais</Text>
+            <Text style={[styles.buttonText, { color: '#fff' }]}>Arreter le relais</Text>
           ) : (
-            <Text style={styles.buttonText}>Démarrer le relais</Text>
+            <Text style={styles.buttonText}>Demarrer le relais</Text>
           )}
         </TouchableOpacity>
+
+        {!isRunning && (
+          <TouchableOpacity
+            style={[styles.button, styles.buttonTest]}
+            onPress={() => testPrint(globalRelay.printerIp, (msg) => globalRelay.addLog(msg))}
+          >
+            <Text style={styles.buttonText}>Tester l&apos;imprimante</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      <Text style={styles.logTitle}>Journal d'activité</Text>
+      <Text style={styles.logTitle}>Journal d'activite</Text>
       <ScrollView style={styles.logContainer}>
         {logs.length === 0 ? (
-          <Text style={styles.logTextEmpty}>Aucune activité...</Text>
+          <Text style={styles.logTextEmpty}>Aucune activite...</Text>
         ) : (
           logs.map((log, index) => (
             <Text key={index} style={styles.logText}>{log}</Text>
@@ -363,10 +301,11 @@ const styles = StyleSheet.create({
   label: { fontSize: 11, fontWeight: '900', textTransform: 'uppercase', color: '#94a3b8', marginBottom: 8, marginLeft: 4, letterSpacing: 0.5 },
   input: { backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#334155', borderRadius: 16, padding: 16, color: '#fff', fontSize: 16, marginBottom: 20, fontWeight: '500' },
   button: { padding: 18, borderRadius: 16, alignItems: 'center', marginTop: 10 },
-   buttonStart: { backgroundColor: '#fbbf24' },
-   buttonStop: { backgroundColor: '#ef4444' },
-   buttonDisabled: { opacity: 0.5 },
-   buttonText: { color: '#0f172a', fontSize: 16, fontWeight: '900' },
+  buttonStart: { backgroundColor: '#fbbf24' },
+  buttonStop: { backgroundColor: '#ef4444' },
+  buttonTest: { backgroundColor: '#334155', marginTop: 0 },
+  buttonDisabled: { opacity: 0.5 },
+  buttonText: { color: '#0f172a', fontSize: 16, fontWeight: '900' },
   logTitle: { fontSize: 12, fontWeight: '900', color: '#64748b', textTransform: 'uppercase', marginBottom: 12, marginLeft: 4 },
   logContainer: { flex: 1, backgroundColor: '#000', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: '#1e293b' },
   logText: { color: '#10b981', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 11, marginBottom: 6 },
