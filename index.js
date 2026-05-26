@@ -8,13 +8,13 @@ global.Buffer = Buffer;
 
 import App from './App';
 import { pollAndPrint, POLL_INTERVAL_MS, generateEscPosBytes } from './relayCore';
-import { RELAY_TASK_ID } from './relayService';
+import { RELAY_TASK_ID, hasNativeRelay } from './relayService';
 
 export { generateEscPosBytes };
 
-try {
-  if (Platform.OS === 'android') {
-    // register() sans argument plante sur certaines versions — config vide obligatoire
+// Polling JS uniquement si le module natif n'est pas disponible (Expo Go / vieille APK)
+if (Platform.OS === 'android' && !hasNativeRelay()) {
+  try {
     ReactNativeForegroundService.register({ config: {} });
 
     ReactNativeForegroundService.add_task(async () => {
@@ -37,9 +37,11 @@ try {
       taskId: RELAY_TASK_ID,
       onError: (e) => console.log('[Relais] Erreur service:', e),
     });
+  } catch (e) {
+    console.error('Foreground Service registration failed', e);
   }
-} catch (e) {
-  console.error('Foreground Service registration failed', e);
+} else if (Platform.OS === 'android') {
+  console.log('[Relais] Module natif actif — polling en Java (arriere-plan)');
 }
 
 registerRootComponent(App);

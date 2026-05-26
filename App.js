@@ -5,7 +5,7 @@ import { useKeepAwake } from 'expo-keep-awake';
 import * as IntentLauncher from 'expo-intent-launcher';
 
 import { pollAndPrint, resetRelayState, setRelayLogHandler, testPrint, CLOUD_URL } from './relayCore';
-import { ensureRelayForegroundRunning, stopRelayForeground } from './relayService';
+import { ensureRelayForegroundRunning, stopRelayForeground, hasNativeRelay } from './relayService';
 
 const globalRelay = {
   logs: [],
@@ -98,8 +98,8 @@ export default function App() {
       if (nextState === 'background' || nextState === 'inactive' || nextState === 'active') {
         const name = globalRelay.shopName?.trim();
         if (!name) return;
-        await ensureRelayForegroundRunning(name);
-        if (nextState === 'active') {
+        await ensureRelayForegroundRunning(name, globalRelay.printerIp);
+        if (nextState === 'active' && !hasNativeRelay()) {
           await pollAndPrint(name, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
         }
       }
@@ -150,8 +150,15 @@ export default function App() {
       if (storedRunning === 'true') {
         setIsRunning(true);
         isRunningRef.current = true;
-        await ensureRelayForegroundRunning(storedShop || globalRelay.shopName);
-        globalRelay.addLog('Relais restaure au demarrage.');
+        await ensureRelayForegroundRunning(
+          storedShop || globalRelay.shopName,
+          storedIp || globalRelay.printerIp,
+        );
+        globalRelay.addLog(
+          hasNativeRelay()
+            ? 'Relais natif restaure (impression arriere-plan).'
+            : 'Relais restaure au demarrage.',
+        );
       }
     } catch (e) {
       globalRelay.addLog(`Erreur chargement: ${e ? e.message : ''}`);
@@ -201,10 +208,13 @@ export default function App() {
         await saveSettings(true);
         globalRelay.addLog(`Relais DEMARRE pour ${validName}`);
 
-        await ensureRelayForegroundRunning(validName);
+        await ensureRelayForegroundRunning(validName, globalRelay.printerIp);
 
-        // Premier poll immediat (la boucle index.js prend le relais en arriere-plan)
-        await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
+        if (hasNativeRelay()) {
+          globalRelay.addLog('Service natif demarre — vous pouvez quitter l\'app.');
+        } else {
+          await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg));
+        }
       } catch (e) {
         Alert.alert('Erreur Reseau', `Impossible de verifier la boutique : ${e.message}`);
       } finally {

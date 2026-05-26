@@ -1,10 +1,17 @@
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
+
+const NativeRelay = NativeModules.BoutididactRelay;
 
 export const RELAY_TASK_ID = 'relay_task';
 export const RELAY_NOTIFICATION_ID = 1244;
 
-export function getRelayForegroundOptions(shopName) {
+/** true si le module natif est present (APK compile avec prebuild/EAS) */
+export function hasNativeRelay() {
+  return Platform.OS === 'android' && NativeRelay != null && typeof NativeRelay.startRelay === 'function';
+}
+
+function getLegacyForegroundOptions(shopName) {
   const name = String(shopName || 'votre boutique').trim() || 'votre boutique';
   return {
     id: RELAY_NOTIFICATION_ID,
@@ -20,47 +27,53 @@ export function getRelayForegroundOptions(shopName) {
 }
 
 /**
- * Demarre ou relance le service foreground + la boucle de taches (polling).
- * A appeler au demarrage du relais et quand l'app passe en arriere-plan.
+ * Demarre le relais en arriere-plan.
+ * Priorite : service Android natif (polling Java). Secours : supersami (dev uniquement).
  */
-export async function ensureRelayForegroundRunning(shopName) {
+export async function ensureRelayForegroundRunning(shopName, printerIp) {
   if (Platform.OS !== 'android') return;
 
-  const opts = getRelayForegroundOptions(shopName);
-  const running = ReactNativeForegroundService.is_running?.();
-  const taskRunning = ReactNativeForegroundService.is_task_running?.(RELAY_TASK_ID);
+  const shop = String(shopName || '').trim();
+  const ip = String(printerIp || '').trim();
+  if (!shop || !ip) return;
 
+  if (hasNativeRelay()) {
+    try {
+      await NativeRelay.startRelay(shop, ip);
+      return;
+    } catch (e) {
+      console.warn('[relayService] native startRelay:', e?.message || e);
+    }
+  }
+
+  // Secours Expo Go / ancienne APK sans module natif
+  const opts = getLegacyForegroundOptions(shop);
   try {
+    const running = ReactNativeForegroundService.is_running?.();
     if (!running) {
-      await ReactNativeForegroundService.start(opts);
-    } else if (!taskRunning) {
-      // Le flag JS dit actif mais la tache a disparu — relance propre
-      try {
-        if (ReactNativeForegroundService.stopAll) {
-          await ReactNativeForegroundService.stopAll();
-        } else {
-          await ReactNativeForegroundService.stop();
-        }
-      } catch { /* ignore */ }
       await ReactNativeForegroundService.start(opts);
     } else {
       await ReactNativeForegroundService.update({
         ...opts,
-        message: `Relais actif — ${String(shopName || '').trim() || 'boutique'}. Impression en arriere-plan.`,
+        message: `Relais actif — ${shop} (mode legacy)`,
       });
     }
   } catch (e) {
-    console.warn('[relayService] ensureRelayForegroundRunning:', e?.message || e);
-    try {
-      await ReactNativeForegroundService.start(opts);
-    } catch (e2) {
-      console.warn('[relayService] start fallback failed:', e2?.message || e2);
-    }
+    console.warn('[relayService] legacy foreground:', e?.message || e);
   }
 }
 
-export function stopRelayForeground() {
+export async function stopRelayForeground() {
   if (Platform.OS !== 'android') return;
+
+  if (hasNativeRelay()) {
+    try {
+      await NativeRelay.stopRelay();
+    } catch (e) {
+      console.warn('[relayService] native stopRelay:', e?.message || e);
+    }
+  }
+
   try {
     if (ReactNativeForegroundService.stopAll) {
       ReactNativeForegroundService.stopAll();
@@ -68,6 +81,6 @@ export function stopRelayForeground() {
       ReactNativeForegroundService.stop();
     }
   } catch (e) {
-    console.warn('[relayService] stop:', e?.message || e);
+    console.warn('[relayService] legacy stop:', e?.message || e);
   }
 }
