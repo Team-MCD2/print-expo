@@ -168,7 +168,7 @@ export default function App() {
         );
         globalRelay.addLog(
           hasNativeRelay()
-            ? 'Relais natif restaure (impression arriere-plan).'
+            ? 'Relais natif restaure — tickets en arriere-plan.'
             : 'Relais restaure au demarrage.',
         );
       }
@@ -222,7 +222,7 @@ export default function App() {
         await ensureRelayForegroundRunning(validName, globalRelay.printerIp, globalRelay.relayKey);
 
         if (hasNativeRelay()) {
-          globalRelay.addLog('Service natif demarre — vous pouvez quitter l\'app.');
+          globalRelay.addLog('Service natif actif — impression en arriere-plan (sans PC).');
         } else {
           await pollAndPrint(validName, globalRelay.printerIp, (msg) => globalRelay.addLog(msg), globalRelay.relayKey);
         }

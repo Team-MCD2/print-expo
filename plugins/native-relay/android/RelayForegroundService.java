@@ -66,7 +66,8 @@ public class RelayForegroundService extends Service {
   private String printerIp = "";
   private String relayKey = "";
   private boolean processing = false;
-  private String lastHandledId = null;
+  private String lastAckedId = null;
+  private String lastPrintedId = null;
   private String lastFailId = null;
   private long lastFailAt = 0;
 
@@ -189,7 +190,21 @@ public class RelayForegroundService extends Service {
         JSONObject ticket = json.getJSONObject("ticket");
         String tid = ticket.optString("ticketId", "Inconnu");
 
-        if (tid.equals(lastHandledId)) return;
+        if (tid.equals(lastAckedId)) return;
+
+        if (tid.equals(lastPrintedId)) {
+          processing = true;
+          try {
+            if (ackTicket(shop)) {
+              lastAckedId = tid;
+              Log.i(TAG, "Ticket " + tid + " acquitte.");
+            }
+          } finally {
+            processing = false;
+          }
+          return;
+        }
+
         if (tid.equals(lastFailId) && (System.currentTimeMillis() - lastFailAt) < PRINT_RETRY_MS) {
           return;
         }
@@ -208,11 +223,15 @@ public class RelayForegroundService extends Service {
 
         boolean printed = printTicket(ticket, targetIp, targetPort);
         if (printed) {
-          ackTicket(shop);
-          lastHandledId = tid;
-          lastFailId = null;
-          lastFailAt = 0;
-          Log.i(TAG, "Ticket " + tid + " imprime.");
+          lastPrintedId = tid;
+          if (ackTicket(shop)) {
+            lastAckedId = tid;
+            lastFailId = null;
+            lastFailAt = 0;
+            Log.i(TAG, "Ticket " + tid + " imprime.");
+          } else {
+            Log.w(TAG, "Ticket " + tid + " imprime — ack en attente");
+          }
         } else {
           lastFailId = tid;
           lastFailAt = System.currentTimeMillis();
@@ -261,7 +280,7 @@ public class RelayForegroundService extends Service {
     }
   }
 
-  private void ackTicket(String shop) {
+  private boolean ackTicket(String shop) {
     try {
       JSONObject body = new JSONObject();
       body.put("shopName", shop);
@@ -273,7 +292,7 @@ public class RelayForegroundService extends Service {
       }
       Request request = ackBuilder.build();
       try (Response response = http.newCall(request).execute()) {
-        if (response.isSuccessful()) return;
+        if (response.isSuccessful()) return true;
       }
     } catch (Exception e) {
       Log.w(TAG, "ack POST failed: " + e.getMessage());
@@ -286,10 +305,13 @@ public class RelayForegroundService extends Service {
         fbBuilder.header("X-Relay-Key", relayKey.trim());
       }
       Request fallback = fbBuilder.get().build();
-      http.newCall(fallback).execute().close();
+      try (Response response = http.newCall(fallback).execute()) {
+        return response.isSuccessful();
+      }
     } catch (Exception e) {
       Log.w(TAG, "ack fallback failed: " + e.getMessage());
     }
+    return false;
   }
 
   private Notification buildNotification(String shop) {
@@ -309,7 +331,7 @@ public class RelayForegroundService extends Service {
       NotificationChannel channel = new NotificationChannel(
           CHANNEL_ID,
           "Relais Boutididact",
-          NotificationManager.IMPORTANCE_LOW
+          NotificationManager.IMPORTANCE_DEFAULT
       );
       channel.setDescription("Maintient l'impression en arriere-plan active.");
       NotificationManager manager = getSystemService(NotificationManager.class);

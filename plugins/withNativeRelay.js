@@ -40,9 +40,40 @@ function withNativeRelayManifest(config) {
           'android:enabled': 'true',
           'android:exported': 'false',
           'android:foregroundServiceType': 'dataSync',
+          'android:stopWithTask': 'false',
         },
       });
     }
+
+    const bootReceiver = `${PKG}.BootReceiver`;
+    if (!application.receiver) application.receiver = [];
+    const bootExists = application.receiver.some(
+      (r) => r.$['android:name'] === bootReceiver,
+    );
+    if (!bootExists) {
+      application.receiver.push({
+        $: {
+          'android:name': bootReceiver,
+          'android:enabled': 'true',
+          'android:exported': 'false',
+        },
+        'intent-filter': [
+          {
+            action: [{ $: { 'android:name': 'android.intent.action.BOOT_COMPLETED' } }],
+          },
+        ],
+      });
+    }
+
+    if (!manifest.manifest['uses-permission']) {
+      manifest.manifest['uses-permission'] = [];
+    }
+    const perms = manifest.manifest['uses-permission'];
+    const bootPerm = 'android.permission.RECEIVE_BOOT_COMPLETED';
+    if (!perms.some((p) => p.$['android:name'] === bootPerm)) {
+      perms.push({ $: { 'android:name': bootPerm } });
+    }
+
     return config;
   });
 }

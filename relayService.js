@@ -41,6 +41,11 @@ export async function ensureRelayForegroundRunning(shopName, printerIp, relayKey
   if (hasNativeRelay()) {
     try {
       await NativeRelay.startRelay(shop, ip, key);
+      try {
+        if (ReactNativeForegroundService.stopAll) {
+          ReactNativeForegroundService.stopAll();
+        }
+      } catch { /* ignore */ }
       return;
     } catch (e) {
       console.warn('[relayService] native startRelay:', e?.message || e);

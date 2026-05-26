@@ -7,7 +7,8 @@ export const PRINT_RETRY_MS = 15000;
 
 const state = {
   processing: false,
-  lastHandledId: null,
+  lastAckedId: null,
+  lastPrintedId: null,
   lastFail: { id: null, at: 0 },
 };
 
@@ -24,7 +25,8 @@ function emitLog(onLog, msg) {
 
 export function resetRelayState() {
   state.processing = false;
-  state.lastHandledId = null;
+  state.lastAckedId = null;
+  state.lastPrintedId = null;
   state.lastFail = { id: null, at: 0 };
 }
 
@@ -259,7 +261,18 @@ export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
     if (!data?.ticket) return;
 
     const tid = data.ticket.ticketId || 'Inconnu';
-    if (tid === state.lastHandledId) return;
+
+    if (tid === state.lastAckedId) return;
+
+    if (tid === state.lastPrintedId) {
+      const acked = await ackTicket(shop, key);
+      if (acked) {
+        state.lastAckedId = tid;
+        emitLog(onLog, `Ticket ${tid} acquitte.`);
+      }
+      return;
+    }
+
     if (state.lastFail.id === tid && Date.now() - state.lastFail.at < PRINT_RETRY_MS) return;
 
     state.processing = true;
@@ -269,10 +282,15 @@ export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
 
     const result = await printEscPos(data.ticket, ip);
     if (result.ok) {
-      const acked = await ackTicket(shop, relayKey);
-      state.lastHandledId = tid;
-      state.lastFail = { id: null, at: 0 };
-      emitLog(onLog, acked ? `Ticket ${tid} imprime.` : `Ticket ${tid} imprime (ack en attente).`);
+      state.lastPrintedId = tid;
+      const acked = await ackTicket(shop, key);
+      if (acked) {
+        state.lastAckedId = tid;
+        state.lastFail = { id: null, at: 0 };
+        emitLog(onLog, `Ticket ${tid} imprime.`);
+      } else {
+        emitLog(onLog, `Ticket ${tid} imprime — acquittement en cours...`);
+      }
     } else {
       state.lastFail = { id: tid, at: Date.now() };
       emitLog(onLog, `Echec impression ${tid} : ${result.detail || 'erreur'} — nouvel essai dans 15s.`);
