@@ -144,9 +144,19 @@ export function generateEscPosBytes(ticket, width = 32) {
 }
 
 function getEscposPayload(ticket, width = 32) {
-  if (ticket?.escposB64) {
-    return Buffer.from(String(ticket.escposB64), 'base64');
+  const hasItems = Array.isArray(ticket?.items) && ticket.items.length > 0;
+  const b64 = ticket?.escposB64;
+
+  if (b64 && String(b64).length > 0) {
+    try {
+      const buf = Buffer.from(String(b64), 'base64');
+      // Buffer trop court = escpos tronqué dans Stripe → on régénère depuis items/total
+      if (buf.length >= 200 || !hasItems) {
+        return buf;
+      }
+    } catch { /* régénération ci-dessous */ }
   }
+
   return generateEscPosBytes(ticket, width);
 }
 

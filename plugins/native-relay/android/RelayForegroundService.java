@@ -271,8 +271,15 @@ public class RelayForegroundService extends Service {
     try {
       byte[] payload;
       String b64 = ticket.optString("escposB64", "").trim();
+      boolean hasItems = ticket.has("items") && ticket.optJSONArray("items") != null
+          && ticket.optJSONArray("items").length() > 0;
+
       if (!b64.isEmpty()) {
         payload = Base64.decode(b64, Base64.DEFAULT);
+        if (payload.length < 200 && hasItems) {
+          Log.w(TAG, "escposB64 tronque — regeneration depuis articles");
+          payload = EscPosBuilder.build(ticket);
+        }
       } else {
         payload = EscPosBuilder.build(ticket);
       }
