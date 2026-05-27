@@ -18,6 +18,7 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.OutputStream;
@@ -25,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -70,6 +72,7 @@ public class RelayForegroundService extends Service {
   private String lastPrintedId = null;
   private String lastFailId = null;
   private long lastFailAt = 0;
+  private long lastRealPrintAt = 0;
 
   @Override
   public void onCreate() {
@@ -190,6 +193,21 @@ public class RelayForegroundService extends Service {
         JSONObject ticket = json.getJSONObject("ticket");
         String tid = ticket.optString("ticketId", "Inconnu");
 
+        if (isCloudTestTicket(ticket)
+            && lastRealPrintAt > 0
+            && (System.currentTimeMillis() - lastRealPrintAt) < 120_000) {
+          processing = true;
+          try {
+            if (ackTicket(shop)) {
+              lastAckedId = tid;
+              Log.i(TAG, "Ticket test ignore (apres commande).");
+            }
+          } finally {
+            processing = false;
+          }
+          return;
+        }
+
         if (tid.equals(lastAckedId)) return;
 
         if (tid.equals(lastPrintedId)) {
@@ -224,6 +242,9 @@ public class RelayForegroundService extends Service {
         boolean printed = printTicket(ticket, targetIp, targetPort);
         if (printed) {
           lastPrintedId = tid;
+          if (!isCloudTestTicket(ticket)) {
+            lastRealPrintAt = System.currentTimeMillis();
+          }
           if (ackTicket(shop)) {
             lastAckedId = tid;
             lastFailId = null;
@@ -280,6 +301,23 @@ public class RelayForegroundService extends Service {
     }
   }
 
+  private static boolean isCloudTestTicket(JSONObject ticket) {
+    if (ticket == null) return true;
+    if (ticket.optBoolean("isTest", false)) return true;
+    String tid = ticket.optString("ticketId", "").trim();
+    if (tid.isEmpty() || "TEST".equals(tid) || tid.startsWith("TEST-")) return true;
+    if ("TEST".equalsIgnoreCase(ticket.optString("payment", ""))) return true;
+    JSONArray items = ticket.optJSONArray("items");
+    if (items != null && items.length() == 1) {
+      JSONObject it = items.optJSONObject(0);
+      if (it != null) {
+        String name = it.optString("name", "").toUpperCase(Locale.ROOT);
+        if (name.contains("TEST LIAISON") || name.contains("TEST CONNEXION")) return true;
+      }
+    }
+    return false;
+  }
+
   private boolean ackTicket(String shop) {
     try {
       JSONObject body = new JSONObject();
@@ -296,20 +334,6 @@ public class RelayForegroundService extends Service {
       }
     } catch (Exception e) {
       Log.w(TAG, "ack POST failed: " + e.getMessage());
-    }
-    try {
-      String encoded = URLEncoder.encode(shop, StandardCharsets.UTF_8.name());
-      Request.Builder fbBuilder = new Request.Builder()
-          .url(CLOUD_URL + "/api/saas/poll-ticket?shopName=" + encoded);
-      if (relayKey != null && !relayKey.trim().isEmpty()) {
-        fbBuilder.header("X-Relay-Key", relayKey.trim());
-      }
-      Request fallback = fbBuilder.get().build();
-      try (Response response = http.newCall(fallback).execute()) {
-        return response.isSuccessful();
-      }
-    } catch (Exception e) {
-      Log.w(TAG, "ack fallback failed: " + e.getMessage());
     }
     return false;
   }

@@ -9,8 +9,24 @@ const state = {
   processing: false,
   lastAckedId: null,
   lastPrintedId: null,
+  lastRealPrintAt: 0,
   lastFail: { id: null, at: 0 },
 };
+
+function isCloudTestTicket(ticket) {
+  if (!ticket || ticket.isTest === true) return true;
+  const tid = String(ticket.ticketId || '').trim();
+  if (!tid) return true;
+  if (tid === 'TEST' || tid.startsWith('TEST-')) return true;
+  const pay = String(ticket.payment || '').toUpperCase();
+  if (pay === 'TEST') return true;
+  const items = ticket.items || [];
+  if (items.length === 1) {
+    const name = String(items[0]?.name || '').toUpperCase();
+    if (name.includes('TEST LIAISON') || name === 'TEST CONNEXION') return true;
+  }
+  return false;
+}
 
 let globalLogHandler = null;
 
@@ -27,6 +43,7 @@ export function resetRelayState() {
   state.processing = false;
   state.lastAckedId = null;
   state.lastPrintedId = null;
+  state.lastRealPrintAt = 0;
   state.lastFail = { id: null, at: 0 };
 }
 
@@ -193,14 +210,6 @@ async function ackTicket(shopName, relayKey) {
       headers: relayHeaders(relayKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({ shopName }),
     });
-    if (res.ok) return true;
-  } catch { /* fallback */ }
-
-  try {
-    const res = await fetch(
-      `${CLOUD_URL}/api/saas/poll-ticket?shopName=${encodeURIComponent(shopName)}`,
-      { headers: relayHeaders(relayKey, { Accept: 'application/json' }) },
-    );
     return res.ok;
   } catch {
     return false;
@@ -262,6 +271,18 @@ export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
 
     const tid = data.ticket.ticketId || 'Inconnu';
 
+    // Ticket test admin encore en file juste après une vraie commande → on vide sans réimprimer.
+    if (
+      isCloudTestTicket(data.ticket)
+      && state.lastRealPrintAt
+      && Date.now() - state.lastRealPrintAt < 120_000
+    ) {
+      const acked = await ackTicket(shop, key);
+      if (acked) state.lastAckedId = tid;
+      emitLog(onLog, 'Ticket test ignore (deja teste ou apres commande).');
+      return;
+    }
+
     if (tid === state.lastAckedId) return;
 
     if (tid === state.lastPrintedId) {
@@ -283,6 +304,9 @@ export async function pollAndPrint(shopName, printerIp, onLog, relayKey = '') {
     const result = await printEscPos(data.ticket, ip);
     if (result.ok) {
       state.lastPrintedId = tid;
+      if (!isCloudTestTicket(data.ticket)) {
+        state.lastRealPrintAt = Date.now();
+      }
       const acked = await ackTicket(shop, key);
       if (acked) {
         state.lastAckedId = tid;
